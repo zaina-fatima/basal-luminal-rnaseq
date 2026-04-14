@@ -1,0 +1,74 @@
+---
+title: "NGS Project"
+author: "Zainab Fatima"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(DESeq2)
+library(SummarizedExperiment)
+library(GEOquery)
+library(tidyverse)
+library(pheatmap)
+```
+```{r}
+data <- readRDS("/opt/omicsdata/datasets/SRP045534.rds")
+class(data)
+data
+dim(data)
+```
+```{r}
+colData(data)
+```
+
+exploring data 
+55k genes, 12 samples, 
+rows are genes, col are samples , values given are expression counts
+```{r}
+counts <- assay(data, "raw_counts")
+dim(counts)
+counts[1:5, 1:5]
+```
+
+
+```{r}
+colData(data)$cell_type <- ifelse(
+  grepl("Luminal", colData(data)$sra.sample_title),
+  "Luminal",
+  "Basal"
+)
+table(colData(data)$cell_type)
+
+colData(data)$sra.sample_title
+```
+
+converting into factors 
+```{r}
+colData(data)$cell_type <- factor(colData(data)$cell_type)
+```
+
+creating DESeq2 Dataset
+```{r}
+library(DESeq2)
+
+dds <- DESeqDataSetFromMatrix(
+  countData = assay(data, "raw_counts"),
+  colData = colData(data),
+  design = ~ cell_type
+)
+dds
+```
+
+removing low filter counts 
+```{r}
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+
+dim(dds)
+```
+
