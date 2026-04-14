@@ -47,6 +47,19 @@ table(colData(data)$cell_type)
 colData(data)$sra.sample_title
 ```
 
+```{r}
+colData(data)$stage <- ifelse(grepl("virgin", colData(data)$sra.sample_title), "virgin",
+                      ifelse(grepl("18.5", colData(data)$sra.sample_title), "pregnant",
+                      ifelse(grepl("2 dL", colData(data)$sra.sample_title), "lactation", NA)))
+
+colData(data)$stage <- factor(colData(data)$stage)
+design = ~ stage + cell_type
+```
+
+
+
+
+
 converting into factors 
 ```{r}
 colData(data)$cell_type <- factor(colData(data)$cell_type)
