@@ -1,0 +1,218 @@
+---
+title: "NGS PROJECT"
+output: html_document
+date: "2026-04-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load packages
+
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(DESeq2)
+library(tidyverse)
+library(readxl)
+library(edgeR)
+library(clusterProfiler)
+```
+
+#load the data 
+```{r}
+rdsobj <- readRDS("/opt/omicsdata/datasets/SRP045534.rds") 
+rdsobj
+class(rdsobj)
+```
+```{r}
+## To visualize the raw count matrix
+assays(rdsobj)
+countmatrix <- rdsobj@assays@data$raw_counts
+dim(countmatrix)
+head(countmatrix)
+
+```
+
+```{r}
+#we visualise first six genes and first six samples
+assay(rdsobj, "raw_counts")[1:6, 1:6]
+```
+```{r}
+colnames(rdsobj)[1:10]
+```
+
+```{r}
+class(colData(rdsobj))
+colData(rdsobj)[1:6, 1:10]
+```
+```{r}
+coldata <- rdsobj@colData %>% data.frame()
+coldata
+```
+
+```{r}
+colnames(coldata)
+```
+
+
+
+
+#extract the $sra.sample_attributes
+```{r}
+colData(rdsobj)$sra.sample_attributes
+```
+```{r}
+colData(rdsobj)$sra.sample_title
+```
+
+```{r}
+#turn the sample title text into clean experimental variables: cell type, stage, and replicate
+coldata$cell_type <- ifelse(grepl("Basal", coldata$sra.sample_title), "Basal",
+                     ifelse(grepl("Luminal", coldata$sra.sample_title), "Luminal", NA))
+
+coldata$stage <- ifelse(grepl("virgin", coldata$sra.sample_title), "virgin",
+                 ifelse(grepl("18.5", coldata$sra.sample_title), "pregnant",
+                 ifelse(grepl("2 dL", coldata$sra.sample_title), "lactation", NA)))
+
+coldata$replicate <- ifelse(grepl("#1", coldata$sra.sample_title), "1",
+                     ifelse(grepl("#2", coldata$sra.sample_title), "2", NA))
+
+table(coldata$cell_type, coldata$stage)
+table(coldata$replicate)
+```
+
+
+
+```{r}
+sample_info <- as.data.frame(colData(rdsobj))
+unique(sample_info$sra.sample_attributes)
+```
+```{r}
+#get how many luminal and basal samples we have 
+
+sample_info$cell_type <- ifelse(grepl("Basal", sample_info$sra.sample_title, ignore.case = TRUE), "Basal",
+                         ifelse(grepl("Luminal", sample_info$sra.sample_title, ignore.case = TRUE), "Luminal", NA))
+
+sample_info$stage <- ifelse(grepl("virgin", sample_info$sra.sample_title, ignore.case = TRUE), "virgin",
+                     ifelse(grepl("18.5", sample_info$sra.sample_title, ignore.case = TRUE), "pregnant",
+                     ifelse(grepl("2 dL", sample_info$sra.sample_title, ignore.case = TRUE), "lactation", NA)))
+
+sample_info$replicate <- ifelse(grepl("#1", sample_info$sra.sample_title), "1",
+                         ifelse(grepl("#2", sample_info$sra.sample_title), "2", NA))
+
+table(sample_info$cell_type)
+table(sample_info$stage)
+table(sample_info$cell_type, sample_info$stage)
+table(sample_info$replicate)
+```
+
+```{r}
+#check the raw count matrix
+
+counts <- assay(rdsobj, "raw_counts")
+dim(counts)
+counts[1:6, 1:6]
+summary(counts)
+```
+
+
+```{r}
+# Check library sizes per sample
+libsizes <- colSums(counts)
+libsizes
+summary(libsizes)
+barplot(libsizes, las = 2, main = "Library sizes", ylab = "Total counts")
+```
+
+```{r}
+#group based 
+
+sample_info$library_size <- libsizes
+
+boxplot(library_size ~ cell_type, data = sample_info,
+        main = "Library size by cell type", ylab = "Total counts")
+
+boxplot(library_size ~ stage, data = sample_info,
+        main = "Library size by stage", ylab = "Total counts")
+
+boxplot(library_size ~ cell_type + stage, data = sample_info,
+        main = "Library size by cell type and stage", ylab = "Total counts", las = 2)
+```
+
+
+
+
+
+```{r}
+#Check how many zeros and low-count genes you have
+sum(counts == 0)
+mean(counts == 0)
+
+gene_totals <- rowSums(counts)
+summary(gene_totals)
+hist(gene_totals, breaks = 50, main = "Gene total counts", xlab = "Row sums")
+hist(log10(gene_totals + 1),
+     breaks = 50,
+     main = "Log10 gene total counts",
+     xlab = "log10(row sums + 1)")
+```
+
+
+#The distribution of gene total counts is highly skewed, with most genes showing low total counts and a small number of genes showing very high counts. This pattern is typical of RNA-seq count data.
+
+#The log-transformed distribution of gene total counts shows a large peak at zero, indicating many genes are not detected in any sample, while the remaining genes span a broad range of expression levels. This pattern is typical of RNA-seq data and suggests the presence of many lowly expressed genes together with a smaller number of highly expressed genes.
+
+```{r}
+#Check how many genes are expressed in how many samples
+detected_samples <- rowSums(counts > 0)
+table(detected_samples)
+```
+
+```{r}
+#Attach the Basal/Luminal info to sample summaries
+
+# Convert sample metadata to a regular data frame
+sample_info <- as.data.frame(colData(rdsobj))
+# Extract cell type from the sample title
+sample_info$cell_type <- ifelse(
+  grepl("Basal", sample_info$sra.sample_title, ignore.case = TRUE), "Basal",
+  ifelse(grepl("Luminal", sample_info$sra.sample_title, ignore.case = TRUE), "Luminal", NA)
+)
+# Extract developmental stage from the sample title
+sample_info$stage <- ifelse(
+  grepl("virgin", sample_info$sra.sample_title, ignore.case = TRUE), "virgin",
+  ifelse(grepl("18.5", sample_info$sra.sample_title, ignore.case = TRUE), "pregnant",
+  ifelse(grepl("2 dL", sample_info$sra.sample_title, ignore.case = TRUE), "lactation", NA))
+)
+# Extract replicate number from the sample title
+sample_info$replicate <- ifelse(
+  grepl("#1", sample_info$sra.sample_title), "1",
+  ifelse(grepl("#2", sample_info$sra.sample_title), "2", NA)
+)
+# Attach the library size of each sample
+sample_info$library_size <- libsizes
+
+# Display a simplified sample summary table
+sample_info[, c("cell_type", "stage", "replicate", "library_size")]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
