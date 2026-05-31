@@ -1,10 +1,7 @@
-# ngs_group11
+# NGS Class Project
 
 ### april 1st 2026
 
-## Zainab&Yousra
+## Authors: Zainab&Yousra
 
-add the name of data 
-link of paper
-biological question : "Compare Basal cell and Luminal cell populations
-The information is stored in the $sra.sample_attributes in colData() object."
+This project investigates transcriptional differences between Basal and Luminal mammary epithelial cells across developmental stages (virgin, pregnant, and lactating mice) using RNA-seq data. The workflow includes quality control, filtering, normalization with DESeq2, differential expression analysis, clustering, GO enrichment, GSEA, marker-gene validation, and biological interpretation of Mcl1 expression in the context of mammary gland development and lactation.
