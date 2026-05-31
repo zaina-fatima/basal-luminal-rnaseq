@@ -1,0 +1,740 @@
+---
+title: "NGS Final Project"
+author: "Zainab Fatima,Yousra Dehgane"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 7, fig.height = 5)
+```
+
+# **EGF-mediated induction of Mcl-1 at the switch to lactation is essential for alveolar cell survival**
+
+## Biological problem:
+
+The mammary gland has two types of epithelial cells; basal and luminal. Basal cells are present in outer layer and provide support and structure, while luminal cells are present as an inner layer and secrete milk when activated. Fu et al. studied multiple samples and measured gene expression across three developmental stages (virgin, pregnant (18.5 days) and lactating mice (2 days).
+For this project, our biological question was to compare basal and luminal cell populations and figure out which genes are different between these cells, their expression levels and what biological functions they control.
+
+### Load packages
+
+First we loaded the required packages that we will be utilising for RNA-seq data such as handling, normalization, differential expression analysis, visualization, clustering, and functional enrichment. These are the packages we used:
+
+-   **Data handling and manipulation:** "SummarizedExperiment", "dplyr"
+
+-   **Normalization, and differential expression:** "DESeq2", "ashr"
+
+DESeq2 finds differentially expressed genes in RNA-seq data by comparing gene counts between groups (Basal and Luminal) and finds which genes change significantly. Ashr is used to remove noise as it shrinks fold change values.
+
+-   **Data visualization:** "ggplot2", "ggrepel", "pheatmap", "RColorBrewer", "ggfortify", "ggridges", "enrichplot".
+
+-   **Clustering and statistical analysis**: clusterprofile
+
+Clusterprofile explains which biological pathways genes follow.
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(SummarizedExperiment)
+library(DESeq2)
+library(EDASeq)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(dplyr)
+library(limma)
+library(ashr)
+library(cluster)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(AnnotationDbi)
+library(ggridges)
+library(limma)
+
+```
+
+## Loading data
+
+The RNA-seq dataset was loaded as a `RangedSummarizedExperiment` object. This object contains the raw count matrix, gene annotation information, sample metadata, and study level metadata. Loading the data in this format allowed the count data and sample information to be accessed together for downstream exploratory analysis, normalization, and differential expression analysis.
+
+Second option: load the original SummarizedExperiment object from the submitted project folder.
+
+load("original_summarized_experiment.RData")
+
+```{r }
+
+data <- readRDS("/opt/omicsdata/datasets/SRP045534.rds")
+
+# Second option: load the original SummarizedExperiment object from the submitted project folder.
+
+#load("original_summarized_experiment.RData")
+
+data
+class(data)
+```
+
+## Exploratory data analysis
+
+Exploratory data analysis starts by inspecting the structure of the `RangedSummarizedExperiment` object, including the raw count matrix and sample metadata. the analysis also included Library sizes, zero count genes, lowly expressed genes, and sample relationships were then examined before normalization and DEA.
+
+### Sample metadata
+
+```{r}
+coldata <- as.data.frame(colData(data))
+head(
+  coldata[, "sra.sample_attributes", drop = FALSE],
+  5
+)
+```
+
+The original sra.sample_attributes contained information about cell population, developmental stage and replicate that was extracted into new metadata columns.
+
+```{r}
+#Extract cell type 
+colData(data)$cell_type <- ifelse(
+  grepl("Luminal", colData(data)$sra.sample_title),
+  "Luminal", "Basal"
+)
+
+# Extract developmental stage
+colData(data)$stage <- ifelse(
+  grepl("virgin", colData(data)$sra.sample_title), "virgin",
+  ifelse(grepl("18.5", colData(data)$sra.sample_title), "pregnant",
+  ifelse(grepl("2 dL", colData(data)$sra.sample_title), "lactation", NA))
+)
+#extract replicate 
+
+colData(data)$replicate <- ifelse(
+  grepl("#1", colData(data)$sra.sample_title), "1",
+  ifelse(grepl("#2", colData(data)$sra.sample_title), "2", NA)
+)
+# Convert to factors
+colData(data)$cell_type <- factor(colData(data)$cell_type)
+colData(data)$stage     <- factor(colData(data)$stage)
+
+# Check the groups are correct
+table(colData(data)$cell_type, colData(data)$stage)
+```
+
+**Sample distribution plot**
+
+A bar plot visualising the results given above by the contingency table to make the experimental design easier to interpret.
+
+```{r}
+sample_meta <- as.data.frame(colData(data))
+
+ggplot(sample_meta, aes(x = cell_type, fill = cell_type)) +
+  geom_bar() +
+  facet_wrap(~ stage, labeller = label_both) +
+  labs(
+    title = "Sample distribution by cell type and developmental stage",
+    x = "Cell type",
+    y = "Number of samples",
+    fill = "Cell type"
+  ) +
+  theme_minimal()
+```
+
+Raw count matrix inspection shows the rows containing the gene ID and the reads of samples in columns.
+
+```{r}
+ #Extract the raw count matrix from the RangedSummarizedExperiment object
+counts <- assay(data, "raw_counts")
+dim(counts)
+counts[1:6, 1:6]
+summary(counts) # Summarize the raw counts for each sample
+
+```
+
+The raw count matrix have 55,421 genes and 12 samples. The first rows showed raw integer read counts for each gene across the samples, with many values equal to zero. The summary statistics also showed that the median count was zero in most samples, indicating that many genes were not expressed or had very low expression. This supported the need to inspect zero count and low count genes before filtering and normalization.
+
+### Check library size per sample
+
+```{r }
+libsizes <- colSums(counts)
+libsizes
+summary(libsizes)
+barplot(libsizes, las = 2, main = "Library sizes", ylab = "Total counts")
+```
+
+The plot shows the total raw counts per sample. Although no extreme outlier was observed, differences in sequencing depth supports the need for normalization before differential expression analysis.
+
+### Check zeros and low-count genes
+
+```{r }
+# There are 19933 genes whose sum is equal to zero
+table(rowSums(assay(data, "raw_counts")) == 0)
+
+sum(counts == 0)
+mean(counts == 0)
+
+gene_totals <- rowSums(counts)
+summary(gene_totals)
+```
+
+### Plot using log10 scale
+
+```{r}
+
+hist(log10(gene_totals + 1),
+     breaks = 50,
+     main = "Log10 gene total counts",
+     xlab = "log10(row sums + 1)")
+```
+
+The large peak near zero indicates many genes with very low expression, supporting the need for low count gene filtering before DESeq2 analysis.
+
+### Filter lowly expressed genes
+
+```{r}
+
+# Keep genes with at least 10 counts in at least 2 samples
+# (2 = size of the smallest group)
+keep <- rowSums(counts >= 10) >= 2
+counts_f <- counts[keep, ]
+
+cat("Genes before filtering:", nrow(counts), "\n")
+cat("Genes after filtering: ", nrow(counts_f), "\n")
+```
+
+Now we are left with 31864 genes.
+
+### EDA boxplot
+
+```{r}
+
+col_celltype <- ifelse(colData(data)$cell_type == "Basal", "#1D9E75", "#7F77DD")
+
+boxplot(
+  log1p(counts_f),
+  col   = col_celltype,
+  las   = 2,
+  ylab  = "log1p(counts)",
+  main  = "Raw counts per sample (filtered)",
+  cex.axis = 0.7
+)
+legend("topright",
+       legend = c("Basal", "Luminal"),
+       fill   = c("#1D9E75", "#7F77DD"))
+```
+
+After filtering the genes, the log-transformed count distributions were compared across samples. The samples showed broadly similar distributions, although some differences remained, supporting the need for normalization before differential expression analysis.
+
+### EDA RLE plot
+
+An RLE plot is generated before normalization to assess sample level expression bias. RLE values compare each gene’s expression in a sample to the median expression of that gene across all samples.
+
+```{r}
+
+col_num <- as.numeric(colData(data)$cell_type)
+
+EDASeq::plotRLE(
+  counts_f,
+  outline = FALSE,
+  col     = col_num,
+  ylab    = "RLE",
+  main    = "RLE plot - before normalization",
+  xaxt    = 'n'
+)
+abline(h = 0, col = "red", lty = 2)
+legend("topright", legend = levels(colData(data)$cell_type),
+       fill = 1:2, cex = 0.8)
+```
+
+We notice that most samples are centered around zero, with some variation between samples still visible, confirming the need for normalization again.
+
+### EDA PCA
+
+PCA is used before normalizing to explore the overall relationships between samples using the filtered count matrix. Samples are coloured by cell type and shaped by developmental stage to check whether the main sources of variation were related to the biological groups.
+
+```{r}
+
+pca_raw <- prcomp(t(log1p(counts_f)))
+
+pca_df <- data.frame(
+  PC1      = pca_raw$x[, 1],
+  PC2      = pca_raw$x[, 2],
+  CellType = colData(data)$cell_type,
+  Stage    = colData(data)$stage
+)
+
+# Variance explained
+var_exp <- round(summary(pca_raw)$importance[2, 1:2] * 100, 1)
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = CellType, shape = Stage)) +
+  geom_point(size = 4) +
+  scale_color_manual(values = c("Basal" = "#1D9E75", "Luminal" = "#7F77DD")) +
+  labs(
+    title = "PCA - before normalization",
+    x     = paste0("PC1 (", var_exp[1], "% variance)"),
+    y     = paste0("PC2 (", var_exp[2], "% variance)")
+  ) +
+  theme_classic()
+```
+
+## Normalization using Deseq2 and model fitting
+
+We used Deseq2 for normalization of the filtered count matrix and fitting the differential expression model using the specific design `~ stage + cell_type` so that the analysis compares Basal and luminal cell populations while accounting for the developmental stage.
+
+```{r }
+#new package DESeq2
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_f,
+  colData   = colData(data),
+  design    = ~ stage + cell_type   # control for stage, test cell_type
+)
+
+#Luminal is reference, so positive logFC = higher in Basal
+dds$cell_type <- relevel(dds$cell_type, ref = "Luminal")
+
+dds <- DESeq(dds)
+```
+
+### Plot dispersion estimatation
+
+```{r}
+# Plot dispersion estimates after DESeq2 model fitting
+plotDispEsts(dds, main = "DESeq2 dispersion estimates")
+```
+
+This plot confirms that DESeq2 estimated gene wise variability and fitted a dispersion trend before differential expression testing.
+
+## Identification of differentially expressed genes
+
+Differential expression results were extracted for the Basal versus Luminal comparison. Positive log2 fold-change values indicate higher expression in Basal samples, while negative values indicate higher expression in Luminal samples. This concludes that a large number of genes show significant differential expression between Basal and Luminal cells.
+
+```{r}
+res <- results(dds,
+               contrast     = c("cell_type", "Basal", "Luminal"),
+               alpha        = 0.05)
+
+summary(res)
+```
+
+## Log2 fold-change shrinkage and significant DEG filtering
+
+We applied the fold-change shrinkage to get a more stable fold_change estimates especially for genes with lower counts. Significant DEGs were then filtered using adjusted p-value \< 0.05 and absolute log2 fold-change \> 1.
+
+```{r  }
+
+res_shrunk <- lfcShrink(
+  dds,
+  contrast = c("cell_type", "Basal", "Luminal"),
+  type     = "ashr" 
+)
+
+summary(res_shrunk)
+
+res_sig <- as.data.frame(res_shrunk)
+res_sig <- res_sig[!is.na(res_sig$padj) &
+                    res_sig$padj < 0.05 &
+                    abs(res_sig$log2FoldChange) > 1, ]
+
+nrow(res_sig)
+```
+
+# DEGs exploration
+
+### **EDA after normalization**
+
+In order to evaluate whether the normalization made the expression distribution more comparable across samples, the RLE were compared before and after VST normalization.
+
+```{r }
+# VST = variance stabilizing transformation from DESeq2
+# Equivalent to TMM+logCPM in your edgeR labs, but integrated in DESeq2
+vsd <- vst(dds, blind = FALSE)
+vst_mat <- assay(vsd)
+
+# RLE after normalization
+par(mfrow = c(1, 2))
+EDASeq::plotRLE(counts_f, outline = FALSE, col = col_num,
+                ylab = "RLE", main = "Before normalization", xaxt = 'n')
+EDASeq::plotRLE(vst_mat,  outline = FALSE, col = col_num,
+                ylab = "RLE", main = "After VST normalization", xaxt = 'n')
+par(mfrow = c(1, 1))
+```
+
+### Boxplot
+
+A boxplot of VST-normalized expression values is generated to compare the expression distributions across samples after normalization.
+
+```{r}
+boxplot(
+  vst_mat,
+  col      = col_celltype,
+  las      = 2,
+  ylab     = "VST expression",
+  main     = "After VST normalization",
+  cex.axis = 0.7
+)
+legend("topright", legend = c("Basal","Luminal"),
+       fill = c("#1D9E75","#7F77DD"))
+```
+
+### PCA
+
+PCA after VST Normalization is performed to check the separation of basal and luminal samples by the main variation in the dataset.
+
+```{r }
+plotPCA(vsd, intgroup = c("cell_type", "stage")) +
+  scale_color_brewer(palette = "Set1") +
+  theme_classic() +
+  labs(title = "PCA after VST normalization - Basal vs Luminal")
+```
+
+### Volcano Plot
+
+A volcano plot was generated to visualize the differential expression results. The x-axis shows the log2 fold-change, while the y-axis shows the statistical significance as `-log10(adjusted p-value)`. Genes on the right are more highly expressed in Basal samples, and genes on the left are more highly expressed in Luminal samples.
+
+```{r}
+tab <- as.data.frame(res_shrunk)
+tab$gene <- rownames(tab)
+
+tab$sign <- "NoSig"
+tab$sign[tab$padj < 0.05 & tab$log2FoldChange >  1] <- "Up_in_Basal"
+tab$sign[tab$padj < 0.05 & tab$log2FoldChange < -1] <- "Up_in_Luminal"
+
+top_genes <- tab[!is.na(tab$padj), ]
+top_genes <- top_genes[order(top_genes$padj), ][1:10, ]
+
+ggplot(tab[!is.na(tab$padj), ],
+       aes(x = log2FoldChange, y = -log10(padj), color = sign)) +
+  geom_point(alpha = 0.4, size = 1) +
+  scale_color_manual(values = c(
+    "Up_in_Basal"   = "#1D9E75",
+    "Up_in_Luminal" = "#7F77DD",
+    "NoSig"         = "grey60"
+  )) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  theme_classic() +
+  labs(title = "Basal vs Luminal - Volcano plot",
+       x = "log2 Fold Change", y = "-log10(adjusted p-value)")
+```
+
+### p-value distribution
+
+```{r}
+hist(
+  res$pvalue,
+  breaks = 50,
+  main = "P-value distribution",
+  xlab = "p-value"
+)
+```
+
+The low p_values shows evidence of differential expression in the Basal versus Luminal comparison.
+
+## **Cluster analysis**
+
+### Heatmap
+
+```{r}
+top100 <- rownames(res_sig[order(res_sig$padj), ])[1:100]
+mat    <- vst_mat[top100, ]
+
+Col <- data.frame(
+  CellType = colData(data)$cell_type,
+  Stage    = colData(data)$stage,
+  row.names = colnames(vst_mat)
+)
+
+ann_colors <- list(
+  CellType = c("Basal" = "#1D9E75", "Luminal" = "#7F77DD")
+)
+mat_scaled <- t(scale(t(mat)))
+
+g <- pheatmap(
+  mat,
+  scale           = "row",
+  show_colnames   = FALSE,
+  show_rownames   = FALSE,
+  annotation_col  = Col,
+  annotation_colors = ann_colors,
+  cluster_cols    = TRUE,
+  cluster_rows    = TRUE,
+  main            = "Top 100 DEGs - Basal vs Luminal"
+)
+```
+
+The top 100 clearly separate the samples according to cell type, with Luminal samples clustering together and Basal samples clustering together.Although developmental stage was included as an annotation, the dominant clustering pattern was driven by cell type (The first 6 samples are Luminal, the last 6 samples are Basal.)
+
+## Silhouette index
+
+```{r}
+# Cut the column dendrogram into 2 clusters
+cut <- cutree(g$tree_col, k = 2)
+
+# Compute distance between samples using the scaled top 100 DEG matrix
+dist_mat <- dist(t(mat_scaled))
+
+# Compute silhouette index
+sil <- silhouette(cut, dist_mat)
+
+# Plot silhouette
+plot(
+  sil,
+  col = c("#1D9E75", "#7F77DD"),
+  border = NA,
+  main = "Silhouette index for top 100 DEG clustering"
+)
+
+# Average silhouette width
+mean(sil[, "sil_width"])
+```
+
+The silhouette plot shows strong separation between the two sample clusters, with an average silhouette width of 0.86. This confirms that the expression profiles of the top DEGs clearly distinguish Basal and Luminal samples.
+
+## Gene set analysis
+
+Gene set analysis identifies sets of genes that work together in a specific biological function/pathway.
+
+### GO enrichment separated by Basal-up and Luminal-up genes
+
+```{r}
+
+# Convert DESeq2 result table to data frame
+tab <- as.data.frame(res_shrunk)
+tab$gene_id <- rownames(tab)
+
+# Remove genes with missing adjusted p-values
+tab <- tab[!is.na(tab$padj), ]
+
+# Remove Ensembl version numbers
+tab$ensembl_clean <- sub("\\..*", "", tab$gene_id)
+
+# Significant DEGs
+sig <- tab[tab$padj < 0.05 & abs(tab$log2FoldChange) > 1, ]
+
+# Separate by direction
+basal_up <- sig$ensembl_clean[sig$log2FoldChange > 1]
+luminal_up <- sig$ensembl_clean[sig$log2FoldChange < -1]
+
+# Universe = all genes tested by DESeq2
+universe <- unique(tab$ensembl_clean)
+
+# Convert IDs to Entrez
+basal_entrez <- mapIds(
+  org.Mm.eg.db,
+  keys = unique(basal_up),
+  column = "ENTREZID",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+luminal_entrez <- mapIds(
+  org.Mm.eg.db,
+  keys = unique(luminal_up),
+  column = "ENTREZID",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+universe_entrez <- mapIds(
+  org.Mm.eg.db,
+  keys = unique(universe),
+  column = "ENTREZID",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+# Remove unmapped IDs
+basal_entrez <- unique(na.omit(as.character(basal_entrez)))
+luminal_entrez <- unique(na.omit(as.character(luminal_entrez)))
+universe_entrez <- unique(na.omit(as.character(universe_entrez)))
+
+cat("Basal-up genes mapped to Entrez:", length(basal_entrez), "\n")
+cat("Luminal-up genes mapped to Entrez:", length(luminal_entrez), "\n")
+cat("Universe genes mapped to Entrez:", length(universe_entrez), "\n")
+
+# GO enrichment for Basal-up genes
+ego_basal <- enrichGO(
+  gene          = basal_entrez,
+  universe      = universe_entrez,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  readable      = TRUE
+)
+
+# GO enrichment for Luminal-up genes
+ego_luminal <- enrichGO(
+  gene          = luminal_entrez,
+  universe      = universe_entrez,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pvalueCutoff  = 0.05,
+  pAdjustMethod = "BH",
+  readable      = TRUE
+)
+
+# Show top terms
+head(ego_basal@result[, 1:6], 10)
+head(ego_luminal@result[, 1:6], 10)
+```
+
+GO enrichment analysis was used to identify biological processes associated with genes more highly expressed in Basal or Luminal samples. This matches the biological framework of Fu et al., where luminal/alveolar cells need strong survival support during lactation, with Mcl-1 playing an important role in maintaining those milk producing cells.
+
+### Gene Set Enrichment Analysis
+
+```{r}
+tt        <- tab$log2FoldChange
+names(tt) <-  tab$ensembl_clean
+
+# Convert to Entrez
+names(tt) <- mapIds(org.Mm.eg.db,
+                    keys      = names(tt),
+                    column    = "ENTREZID",
+                    keytype   = "ENSEMBL",
+                    multiVals = "first")
+
+# Remove genes without Entrez ID, duplicated IDs, and NA fold changes
+
+tt      <- tt[!is.na(names(tt))]
+tt      <- tt[!is.na(tt)]
+tt      <- tt[!duplicated(names(tt))]
+
+# Sort from Basal-up to Luminal-up
+
+sort_tt <- sort(tt, decreasing = TRUE)
+
+cat("Genes in ranked list:", length(sort_tt), "\n")
+
+```
+
+For GSEA, genes were ranked using their log2 fold-change values from the Basal versus Luminal comparison. The final ranked list contained 22,374 genes. GSEA uses the full ranked gene list unlike ORA.
+
+### GO GSEA using Biological Process terms
+
+GSEA tests whether genes belonging to a GO term are concentrated towards one end of the ranked gene list.
+
+```{r}
+# GSEA GO
+kkGO <- gseGO(
+  geneList      = sort_tt,
+  ont           = "BP",
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  verbose       = FALSE
+)
+head(kkGO@result[, 1:6], 10)
+
+# Plots 
+dotplot(kkGO, showCategory = 10,
+        title = "GSEA GO Biological Process") +
+  theme(axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(size = 9),
+        plot.title = element_text(size = 11))
+
+ridgeplot(kkGO, label_format = 40, showCategory = 10) +
+  theme(axis.text.y = element_text(size = 8))
+
+gseaplot(kkGO, geneSetID = kkGO@result$ID[1],
+         title = kkGO@result$Description[1])
+```
+
+# Biological interpretation
+
+To confirm that our DESeq2 analysis would be able to detect Basal and Luminal as separate groups. We looked at the expression of six published mammary epithelial cell-type markers (Henry,et al., 2021).
+
+The three Basal markers are:
+
+-   Krt14 (Keratin 14), Keratin 5 (Krt5), ACTA2 (Actin Alpha 2)
+
+The three Luminal markers are:
+
+-   Krt18 (Keratin 18), Esr1 (Oestrogen Receptor Alpha), Casein Beta (Csn2)
+
+```{r}
+markers_symbols <- c("Krt14", "Krt5", "Acta2",    # expected UP in Basal
+                     "Krt18", "Esr1", "Csn2")      # expected UP in Luminal
+
+markers_entrez <- mapIds(org.Mm.eg.db,
+                         keys    = markers_symbols,
+                         column  = "ENTREZID",
+                         keytype = "SYMBOL",
+                         multiVals = "first")
+
+# Match back to our results using cleaned Ensembl IDs
+tab_clean <- tab
+rownames(tab_clean) <- sub("\\..*", "", rownames(tab_clean))
+
+# Convert tab rownames to symbols for easy reading
+tab_clean$symbol <- mapIds(org.Mm.eg.db,
+                           keys    = rownames(tab_clean),
+                           column  = "SYMBOL",
+                           keytype = "ENSEMBL",
+                           multiVals = "first")
+tab_clean$sign <- ifelse(
+  tab_clean$log2FoldChange > 0,
+  "Basal-up",
+  "Luminal-up"
+)
+
+# Show the marker genes
+marker_results <- tab_clean[tab_clean$symbol %in% markers_symbols &
+                              !is.na(tab_clean$symbol), 
+                             c("symbol", "log2FoldChange", "padj", "sign")]
+
+marker_results <- marker_results[order(marker_results$log2FoldChange, 
+                                       decreasing = TRUE), ]
+marker_results
+```
+
+We used this marker gene to verify that the DESeq2 results are biologically consistent with known Basal and Luminal cell identities. All genes had very significant adjusted p-values (padj \< 1e-4). This is an exceptional significance for a known Basal marker which is strong evidence that:
+
+1.  Our sample labeling is correct (Basal and Luminal samples are indeed correctly sorted)
+
+2.  Our analysis pipeline is working properly
+
+3.  Our results are biologically relevant and comparable with published ones.
+
+The marker gene validation is the standard in transcriptomic studies. The perfect concordance between our computational predictions and known biological facts demonstrates that our DESeq2 analysis faithfully captures the true transcriptional differences between these cell types.
+
+### Targeted inspection of Mcl1
+
+MCL-1 is the pro-survival protein that was the specific focus of the original Fu et al. (2015) study, so we looked at the level of its expression in our results with DESeq2.
+
+```{r}
+
+# Create the table from DESeq2 shrunk results
+tab_mcl1 <- as.data.frame(res_shrunk)
+
+# Clean Ensembl IDs
+tab_mcl1$ensembl_clean <- sub("\\..*", "", rownames(tab_mcl1))
+
+# Add gene symbols
+tab_mcl1$symbol <- mapIds(
+  org.Mm.eg.db,
+  keys = tab_mcl1$ensembl_clean,
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+# Extract Mcl1 result
+mcl1_result <- tab_mcl1[
+  tab_mcl1$symbol == "Mcl1" & !is.na(tab_mcl1$symbol),
+  c("symbol", "baseMean", "log2FoldChange", "padj")
+]
+
+mcl1_result
+```
+
+We can conclude the Mcl1 is higher in Luminal cells.
+
+# Conclusion
+
+This comprehensive RNA-seq analysis of mammary epithelial cell populations successfully identified and characterized the transcriptional differences between Basal and Luminal cells across developmental stages. Starting with 55,421 genes and going with downstream analyses identifying 10,845 significantly differentially expressed genes. The results obtained at each stage of this pipeline are consistent with the original Fu et al. (2015) paper and provide a comprehensive molecular reference for understanding how Basal and Luminal cells achieve their specialized functions in the developing, pregnant, and lactating mammary gland.
+
+## References:
+
+1.  Fu, N.Y., Rios, A.C., Pal, B., Soetanto, R., Lun, A.T., Liu, K., Beck, T., Best, S.A., Vaillant, F., Bouillet, P. and Strasser, A., 2015. EGF-mediated induction of Mcl-1 at the switch to lactation is essential for alveolar cell survival. *Nature Cell Biology*, *17*(4), pp.365-375.
+
+2.  Henry, S., Trousdell, M.C., Cyrill, S.L., Zhao, Y., Feigman, M.J., Bouhuis, J.M., Aylard, D.A., Siepel, A. and Dos Santos, C.O., 2021. Characterization of gene expression signatures for the identification of cellular heterogeneity in the developing mammary gland. *Journal of mammary gland biology and neoplasia*, *26*(1), pp.43-66.
